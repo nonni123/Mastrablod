@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="is">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Mastrakort</title>
+
+  <!-- Leaflet 1.9.4 -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+  <!-- Proj4js -->
+  <script src="https://cdn.jsdelivr.net/npm/proj4@2.9.2/dist/proj4.js"></script>
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+
+    #map {
+      position: fixed;
+      inset: 0;
+      height: 100%;
+      width: 100%;
+    }
+
+    /* Leitargluggi efst á kortinu */
+    #search-container {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      width: min(320px, calc(100% - 20px));
+    }
+
+    #search-input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 12px 14px;
+      font-size: 16px; /* kemur í veg fyrir sjálfvirkt zoom á iOS */
+      border: none;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      outline: none;
+    }
+
+    #search-results {
+      margin-top: 4px;
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      max-height: 40vh;
+      overflow-y: auto;
+      display: none;
+    }
+
+    #search-results .search-result {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+      text-align: left;
+      padding: 12px 14px;
+      font-size: 16px;
+      border: none;
+      border-bottom: 1px solid #eee;
+      background: #fff;
+      cursor: pointer;
+    }
+
+    #search-results .search-result:last-child {
+      border-bottom: none;
+    }
+
+    #search-results .search-result:hover,
+    #search-results .search-result:focus {
+      background: #f0f4ff;
+    }
+
+    #search-results .search-empty {
+      padding: 12px 14px;
+      font-size: 15px;
+      color: #666;
+    }
+
+    /* Hnappar neðst á kortinu */
+    #button-bar {
+      position: absolute;
+      bottom: max(20px, env(safe-area-inset-bottom));
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      display: flex;
+      gap: 10px;
+    }
+
+    #button-bar button {
+      padding: 12px 16px;
+      font-size: 15px;
+      font-weight: 600;
+      border: none;
+      border-radius: 8px;
+      background: #1a73e8;
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+
+    #button-bar button:active {
+      background: #1557b0;
+    }
+
+    /* Villu- og upplýsingaborði */
+    #message-banner {
+      position: absolute;
+      top: 70px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1100;
+      width: min(360px, calc(100% - 20px));
+      box-sizing: border-box;
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: #c62828;
+      color: #fff;
+      font-size: 15px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      display: none;
+    }
+
+    #message-banner.info {
+      background: #1a73e8;
+    }
+
+    /* Popup-innihald */
+    .mast-popup table {
+      border-collapse: collapse;
+      margin-bottom: 8px;
+    }
+
+    .mast-popup td {
+      padding: 2px 6px 2px 0;
+      font-size: 14px;
+    }
+
+    .mast-popup td:first-child {
+      font-weight: 600;
+    }
+
+    .route-button {
+      display: inline-block;
+      padding: 10px 14px;
+      background: #1a73e8;
+      color: #fff !important;
+      text-decoration: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="search-container">
+    <input id="search-input" type="search" placeholder="Leita að mastri..."
+           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    <div id="search-results"></div>
+  </div>
+
+  <div id="message-banner" role="alert"></div>
+
+  <div id="button-bar">
+    <button id="btn-my-location" type="button">Mín staðsetning</button>
+    <button id="btn-nearest-mast" type="button">Næsta mastur</button>
+  </div>
+
+  <script>
+    'use strict';
+
+    // --- Hnitakerfi: ISN93 / Lambert 1993 (EPSG:3057) -> WGS84 (EPSG:4326) ---
+    var ISN93 = '+proj=lcc +lat_1=64.25 +lat_2=65.75 +lat_0=65 +lon_0=-19 +x_0=500000 +y_0=500000 +ellps=GRS80 +units=m +no_defs +type=crs';
+    var WGS84 = 'EPSG:4326';
+
+    // --- Kort ---
+    var map = L.map('map', { zoomControl: true });
+    map.zoomControl.setPosition('bottomright');
+
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> framlagsaðilar'
+    }).addTo(map);
+
+    // Sjálfgefin sýn ef engin gögn hlaðast (miðja Íslands)
+    map.setView([64.9631, -19.0208], 6);
+
+    // --- Ástand ---
+    var masts = [];            // { name, easting, northing, lat, lon, marker }
+    var mastsLoaded = false;   // satt þegar mastur.csv hefur hlaðist með gildum punktum
+    var userPosition = null;   // { lat, lon, accuracy }
+    var userMarker = null;
+    var accuracyCircle = null;
+
+    // --- Skilaboð til notanda ---
+    var banner = document.getElementById('message-banner');
+    var bannerTimer = null;
+    var persistentMessage = null; // alvarleg villa sem á að standa áfram
+
+    function renderBanner(text, type) {
+      banner.textContent = text;
+      banner.className = type === 'info' ? 'info' : '';
+      banner.style.display = 'block';
+    }
+
+    function hideOrRestoreBanner() {
+      if (persistentMessage) {
+        renderBanner(persistentMessage.text, persistentMessage.type);
+      } else {
+        banner.style.display = 'none';
+      }
+    }
+
+    // Skilaboð án timeoutMs eru viðvarandi og birtast aftur
+    // þegar tímabundin skilaboð renna út.
+    function showMessage(text, type, timeoutMs) {
+      if (bannerTimer) {
+        clearTimeout(bannerTimer);
+        bannerTimer = null;
+      }
+      renderBanner(text, type);
+      if (timeoutMs) {
+        bannerTimer = setTimeout(function () {
+          bannerTimer = null;
+          hideOrRestoreBanner();
+        }, timeoutMs);
+      } else {
+        persistentMessage = { text: text, type: type };
+      }
+    }
+
+    // --- Fjarlægðarbirting ---
+    function formatDistance(meters) {
+      if (meters < 1000) {
+        return Math.round(meters) + ' m';
+      }
+      return (meters / 1000).toFixed(2).replace('.', ',') + ' km';
+    }
+
+    // --- Popup-innihald, búið til við hverja opnun svo fjarlægð sé fersk ---
+    function buildPopupContent(mast) {
+      var container = document.createElement('div');
+      container.className = 'mast-popup';
+
+      var rows = [
+        ['Mastur', mast.name],
+        ['Easting (ISN93)', mast.easting.toFixed(3).replace('.', ',')],
+        ['Northing (ISN93)', mast.northing.toFixed(3).replace('.', ',')],
+        ['Latitude (WGS84)', mast.lat.toFixed(6)],
+        ['Longitude (WGS84)', mast.lon.toFixed(6)]
+      ];
+
+      if (userPosition) {
+        var d = map.distance(
+          L.latLng(userPosition.lat, userPosition.lon),
+          L.latLng(mast.lat, mast.lon)
+        );
+        rows.push(['Fjarlægð', formatDistance(d)]);
+      }
+
+      var table = document.createElement('table');
+      rows.forEach(function (row) {
+        var tr = document.createElement('tr');
+        var tdLabel = document.createElement('td');
+        tdLabel.textContent = row[0];
+        var tdValue = document.createElement('td');
+        tdValue.textContent = row[1];
+        tr.appendChild(tdLabel);
+        tr.appendChild(tdValue);
+        table.appendChild(tr);
+      });
+      container.appendChild(table);
+
+      var destination = mast.lat.toFixed(6) + ',' + mast.lon.toFixed(6);
+      var url = 'https://www.google.com/maps/dir/?api=1'
+        + '&destination=' + encodeURIComponent(destination)
+        + '&travelmode=driving';
+
+      var link = document.createElement('a');
+      link.className = 'route-button';
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = 'Leið að mastri';
+      container.appendChild(link);
+
+      return container;
+    }
+
+    // --- CSV lestur ---
+    function parseCsv(text) {
+      var lines = text.split(/\r\n|\n|\r/);
+      if (lines.length === 0) {
+        return [];
+      }
+
+      var header = lines[0].split(';').map(function (h) {
+        return h.trim().toLowerCase();
+      });
+      var iMast = header.indexOf('mastur');
+      var iEasting = header.indexOf('easting');
+      var iNorthing = header.indexOf('northing');
+
+      if (iMast === -1 || iEasting === -1 || iNorthing === -1) {
+        console.warn('CSV-fyrirsögn vantar dálka. Fann:', header.join(', '));
+        return [];
+      }
+
+      var result = [];
+      for (var i = 1; i < lines.length; i++) {
+        var line = lines[i];
+        if (line.trim() === '') {
+          continue; // tóm lína
+        }
+        var cols = line.split(';');
+        var name = (cols[iMast] || '').trim();
+        var eastingText = (cols[iEasting] || '').trim();
+        var northingText = (cols[iNorthing] || '').trim();
+
+        if (eastingText === '' || northingText === '') {
+          console.warn('Lína ' + (i + 1) + ' sleppt: hnit vantar ("' + line + '")');
+          continue;
+        }
+
+        var easting = Number(eastingText);
+        var northing = Number(northingText);
+
+        if (!isFinite(easting) || !isFinite(northing)) {
+          console.warn('Lína ' + (i + 1) + ' sleppt: ógild hnit ("' + line + '")');
+          continue;
+        }
+
+        result.push({ name: name, easting: easting, northing: northing });
+      }
+      return result;
+    }
+
+    function loadMasts() {
+      fetch('mastur.csv')
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error('HTTP ' + response.status);
+          }
+          return response.text();
+        })
+        .then(function (text) {
+          var rows = parseCsv(text);
+
+          rows.forEach(function (row) {
+            // proj4 tekur [easting, northing] og skilar [longitude, latitude]
+            var lonLat = proj4(ISN93, WGS84, [row.easting, row.northing]);
+            var lon = lonLat[0];
+            var lat = lonLat[1];
+
+            if (!isFinite(lat) || !isFinite(lon)) {
+              console.warn('Mastur ' + row.name + ' sleppt: umbreyting hnita mistókst.');
+              return;
+            }
+
+            var mast = {
+              name: row.name,
+              easting: row.easting,
+              northing: row.northing,
+              lat: lat,
+              lon: lon,
+              marker: null
+            };
+
+            // Leaflet notar [latitude, longitude]
+            var marker = L.marker([lat, lon], { title: mast.name }).addTo(map);
+            marker.bindPopup(function () {
+              return buildPopupContent(mast);
+            }, { maxWidth: 280 });
+            mast.marker = marker;
+
+            masts.push(mast);
+          });
+
+          if (masts.length === 0) {
+            showMessage('Engir gildir mastrapunktar fundust í mastur.csv.');
+            return;
+          }
+
+          mastsLoaded = true;
+
+          var bounds = L.latLngBounds(masts.map(function (m) {
+            return [m.lat, m.lon];
+          }));
+          map.fitBounds(bounds, { padding: [50, 50], maxZoom: 17 });
+        })
+        .catch(function (err) {
+          console.error('Villa við að sækja mastur.csv:', err);
+          showMessage('Ekki tókst að lesa mastur.csv. Athugaðu að síðan sé keyrð af vefþjóni (ekki file://).');
+        });
+    }
+
+    loadMasts();
+
+    // --- GPS-staðsetning notanda ---
+    function onLocationUpdate(position) {
+      var lat = position.coords.latitude;
+      var lon = position.coords.longitude;
+      var accuracy = position.coords.accuracy;
+
+      userPosition = { lat: lat, lon: lon, accuracy: accuracy };
+
+      if (!userMarker) {
+        userMarker = L.circleMarker([lat, lon], {
+          radius: 9,
+          color: '#ffffff',
+          weight: 3,
+          fillColor: '#1a73e8',
+          fillOpacity: 1
+        }).addTo(map);
+        userMarker.bindPopup('Þú ert hér');
+
+        accuracyCircle = L.circle([lat, lon], {
+          radius: accuracy,
+          color: '#1a73e8',
+          weight: 1,
+          fillColor: '#1a73e8',
+          fillOpacity: 0.15,
+          interactive: false
+        }).addTo(map);
+      } else {
+        // Uppfærum lögin í stað þess að eyða og endurskapa þau
+        userMarker.setLatLng([lat, lon]);
+        accuracyCircle.setLatLng([lat, lon]);
+        accuracyCircle.setRadius(accuracy);
+      }
+      // Vísvitandi ekkert setView/panTo hér - kortið á ekki að hreyfast
+      // sjálfkrafa við hverja GPS-uppfærslu.
+    }
+
+    function onLocationError(error) {
+      var text;
+      switch (error.code) {
+        case error.PERMISSION_DENIED:
+          text = 'Staðsetningarheimild var hafnað. Leyfðu staðsetningu í stillingum vafrans til að sjá þína staðsetningu á kortinu.';
+          break;
+        case error.POSITION_UNAVAILABLE:
+          text = 'GPS-staðsetning finnst ekki. Athugaðu að staðsetningarþjónusta tækisins sé virk.';
+          break;
+        case error.TIMEOUT:
+          text = 'Það tók of langan tíma að finna GPS-staðsetningu. Reyndu aftur.';
+          break;
+        default:
+          text = 'Óþekkt villa kom upp við að sækja GPS-staðsetningu.';
+      }
+      console.warn('Geolocation-villa:', error);
+      showMessage(text, 'error', 8000);
+    }
+
+    if ('geolocation' in navigator) {
+      navigator.geolocation.watchPosition(onLocationUpdate, onLocationError, {
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 20000
+      });
+    } else {
+      showMessage('Þessi vafri styður ekki staðsetningarþjónustu.');
+    }
+
+    // --- Hnappur: Mín staðsetning ---
+    document.getElementById('btn-my-location').addEventListener('click', function () {
+      if (userPosition) {
+        map.setView([userPosition.lat, userPosition.lon], Math.max(map.getZoom(), 15));
+      } else {
+        showMessage('GPS-staðsetning er ekki þekkt ennþá. Athugaðu að staðsetningarheimild sé leyfð.', 'error', 6000);
+      }
+    });
+
+    // --- Hnappur: Næsta mastur ---
+    document.getElementById('btn-nearest-mast').addEventListener('click', function () {
+      if (!userPosition) {
+        showMessage('GPS-staðsetning er ekki þekkt ennþá, því er ekki hægt að finna næsta mastur.', 'error', 6000);
+        return;
+      }
+      if (masts.length === 0) {
+        showMessage('Engin möstur eru á kortinu.', 'error', 6000);
+        return;
+      }
+
+      var here = L.latLng(userPosition.lat, userPosition.lon);
+      var nearest = null;
+      var nearestDistance = Infinity;
+
+      masts.forEach(function (mast) {
+        var d = map.distance(here, L.latLng(mast.lat, mast.lon));
+        if (d < nearestDistance) {
+          nearestDistance = d;
+          nearest = mast;
+        }
+      });
+
+      map.setView([nearest.lat, nearest.lon], 17);
+      nearest.marker.openPopup();
+      showMessage('Næsta mastur er ' + nearest.name + ' í ' + formatDistance(nearestDistance) + ' fjarlægð.', 'info', 8000);
+    });
+
+    // --- Leit að mastri ---
+    var searchContainer = document.getElementById('search-container');
+    var searchInput = document.getElementById('search-input');
+    var searchResults = document.getElementById('search-results');
+
+    // Leitin má ekki trufla drag eða zoom á kortinu
+    L.DomEvent.disableClickPropagation(searchContainer);
+    L.DomEvent.disableScrollPropagation(searchContainer);
+
+    function clearSearchResults() {
+      searchResults.innerHTML = '';
+      searchResults.style.display = 'none';
+    }
+
+    function selectMast(mast) {
+      clearSearchResults();
+      searchInput.value = mast.name;
+      searchInput.blur();
+      map.setView([mast.lat, mast.lon], 17);
+      mast.marker.openPopup();
+    }
+
+    function runSearch() {
+      var query = searchInput.value.trim().toLowerCase();
+      searchResults.innerHTML = '';
+
+      if (query === '') {
+        searchResults.style.display = 'none';
+        return;
+      }
+
+      if (!mastsLoaded) {
+        var notice = document.createElement('div');
+        notice.className = 'search-empty';
+        notice.textContent = 'Engin mastragögn eru hlaðin. Ekki tókst að lesa mastur.csv - athugaðu að síðan sé keyrð af vefþjóni (ekki file://).';
+        searchResults.appendChild(notice);
+        searchResults.style.display = 'block';
+        return;
+      }
+
+      var matches = masts.filter(function (mast) {
+        return mast.name.toLowerCase().indexOf(query) !== -1;
+      });
+
+      if (matches.length === 0) {
+        var empty = document.createElement('div');
+        empty.className = 'search-empty';
+        empty.textContent = 'Ekkert mastur fannst.';
+        searchResults.appendChild(empty);
+      } else {
+        matches.forEach(function (mast) {
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'search-result';
+          button.textContent = mast.name;
+          button.addEventListener('click', function () {
+            selectMast(mast);
+          });
+          searchResults.appendChild(button);
+        });
+      }
+      searchResults.style.display = 'block';
+    }
+
+    searchInput.addEventListener('input', runSearch);
+    searchInput.addEventListener('focus', runSearch);
+  </script>
+</body>
+</html>
