@@ -14,6 +14,9 @@
   <!-- Proj4js -->
   <script src="https://cdn.jsdelivr.net/npm/proj4@2.9.2/dist/proj4.js"></script>
 
+  <!-- shpjs: les zippaðar shape-skrár í vafranum -->
+  <script src="https://unpkg.com/shpjs@4.0.4/dist/shp.js"></script>
+
   <style>
     html, body {
       margin: 0;
@@ -192,10 +195,29 @@
     var map = L.map('map', { zoomControl: true });
     map.zoomControl.setPosition('bottomright');
 
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    var osmLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> framlagsaðilar'
-    }).addTo(map);
+    });
+
+    var esriImageryLayer = L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      {
+        maxZoom: 19,
+        attribution: 'Loftmynd: &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+      }
+    );
+
+    osmLayer.addTo(map);
+
+    var layersControl = L.control.layers(
+      {
+        'Kort (OSM)': osmLayer,
+        'Loftmynd (Esri)': esriImageryLayer
+      },
+      null,
+      { position: 'topright' }
+    ).addTo(map);
 
     // Sjálfgefin sýn ef engin gögn hlaðast (miðja Íslands)
     map.setView([64.9631, -19.0208], 6);
@@ -410,6 +432,113 @@
     }
 
     loadMasts();
+
+    // --- Línuleið úr shape-skrá eða GeoJSON ---
+    // Reynir fyrst linuleid.zip (zippuð shapefile: .shp, .dbf og helst .prj),
+    // annars linuleid.geojson. Ef hvorug skráin finnst er laginu einfaldlega sleppt.
+
+    // Ef .prj vantar í zip-skrána koma hnitin óbreytt út.
+    // Þá er gert ráð fyrir ISN93 og umbreytt yfir í WGS84.
+    function reprojectIsn93IfNeeded(geojson) {
+      var needsReprojection = false;
+
+      function walkCoords(coords, fn) {
+        if (typeof coords[0] === 'number') {
+          return fn(coords);
+        }
+        return coords.map(function (c) { return walkCoords(c, fn); });
+      }
+
+      var features = geojson.features || [];
+      for (var i = 0; i < features.length; i++) {
+        var geom = features[i].geometry;
+        if (!geom || !geom.coordinates) { continue; }
+        walkCoords(geom.coordinates, function (pt) {
+          if (Math.abs(pt[0]) > 180 || Math.abs(pt[1]) > 90) {
+            needsReprojection = true;
+          }
+          return pt;
+        });
+        break; // fyrsta geometrían nægir til að greina hnitakerfið
+      }
+
+      if (!needsReprojection) {
+        return geojson;
+      }
+
+      console.warn('Línuleið: hnit líta út fyrir að vera í ISN93 - umbreyti í WGS84.');
+      features.forEach(function (feature) {
+        var geom = feature.geometry;
+        if (!geom || !geom.coordinates) { return; }
+        geom.coordinates = walkCoords(geom.coordinates, function (pt) {
+          return proj4(ISN93, WGS84, [pt[0], pt[1]]);
+        });
+      });
+      return geojson;
+    }
+
+    function addLineLayer(geojson, name) {
+      var layer = L.geoJSON(geojson, {
+        style: {
+          color: '#d32f2f',
+          weight: 3,
+          opacity: 0.9
+        },
+        onEachFeature: function (feature, featureLayer) {
+          var props = feature.properties || {};
+          var keys = Object.keys(props);
+          if (keys.length === 0) { return; }
+          var html = keys.map(function (key) {
+            var value = props[key];
+            return '<b>' + key + ':</b> ' + (value === null || value === undefined ? '' : String(value));
+          }).join('<br>');
+          featureLayer.bindPopup(html);
+        }
+      });
+      layer.addTo(map);
+      layersControl.addOverlay(layer, name);
+    }
+
+    function loadLineRoute() {
+      fetch('linuleid.zip')
+        .then(function (response) {
+          if (!response.ok) {
+            throw new Error('HTTP ' + response.status);
+          }
+          return response.arrayBuffer();
+        })
+        .then(function (buffer) {
+          return shp(buffer);
+        })
+        .then(function (result) {
+          // shpjs skilar FeatureCollection, eða fylki ef zip-skráin
+          // inniheldur fleiri en eina shape-skrá
+          var collections = Array.isArray(result) ? result : [result];
+          collections.forEach(function (collection, index) {
+            var name = collection.fileName || 'Línuleið' + (collections.length > 1 ? ' ' + (index + 1) : '');
+            addLineLayer(reprojectIsn93IfNeeded(collection), name);
+          });
+        })
+        .catch(function (zipError) {
+          // Ekkert zip - reynum GeoJSON í staðinn
+          fetch('linuleid.geojson')
+            .then(function (response) {
+              if (!response.ok) {
+                throw new Error('HTTP ' + response.status);
+              }
+              return response.json();
+            })
+            .then(function (geojson) {
+              addLineLayer(reprojectIsn93IfNeeded(geojson), 'Línuleið');
+            })
+            .catch(function (geojsonError) {
+              console.info('Engin línuleið fannst (linuleid.zip: ' + zipError.message
+                + ', linuleid.geojson: ' + geojsonError.message + '). Laginu sleppt.');
+            });
+        });
+    }
+
+    loadLineRoute();
 
     // --- GPS-staðsetning notanda ---
     function onLocationUpdate(position) {
